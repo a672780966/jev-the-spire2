@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { actionsFor, fingerprint, factsFor } from './actions.mjs';
 import { decisionCandidates, decisionQuestion, POLICY_VERSION } from './planner.mjs';
+import { jevBackendFailure } from './backend-errors.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT ?? 4317);
@@ -164,7 +165,7 @@ async function step(token, preview = false) {
     if (view.decisions >= MAX_DECISIONS || view.inputTokens >= MAX_INPUT_TOKENS) {
       stop('Session budget reached. Restart the server to begin another session.'); return;
     }
-    if (!apiKey) throw new Error('Missing TYPESAFE_API_KEY or private TypeSafe configuration.');
+    if (!apiKey) throw jevBackendFailure('Missing TypeSafe credentials.');
     view.message = 'Jev is choosing…';
     view.pending = { startedAt: Date.now(), options: actions.length };
     const start = performance.now();
@@ -181,12 +182,18 @@ async function step(token, preview = false) {
         const body=JSON.stringify(payload);
         const attempt=async signal=>{
           view.hedgeAttempts=(view.hedgeAttempts??0)+1;
-          const r=await fetch('https://openrouter.ai/api/alpha/decisions',{
-            method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${apiKey}`},
-            body,signal:AbortSignal.any([signal,AbortSignal.timeout(30000)]),
-          });
-          if(!r.ok)throw Error(`TypeSafe HTTP ${r.status}; paused. Retry with Resume.`);
-          return await r.json();
+          let r;
+          try {
+            r=await fetch('https://openrouter.ai/api/alpha/decisions',{
+              method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${apiKey}`},
+              body,signal:AbortSignal.any([signal,AbortSignal.timeout(30000)]),
+            });
+          } catch (error) {
+            throw jevBackendFailure('TypeSafe request failed.', error);
+          }
+          if(!r.ok)throw jevBackendFailure(`TypeSafe HTTP ${r.status}.`);
+          try { return await r.json(); }
+          catch (error) { throw jevBackendFailure('TypeSafe returned invalid JSON.', error); }
         };
         const result=hedgeEnabled?await hedged(attempt):await attempt(new AbortController().signal);
         view.decisions++;view.inputTokens+=result.usage?.input_tokens??0;
@@ -224,8 +231,14 @@ async function step(token, preview = false) {
     nextDecisionAt = Date.now() + 1200;
     await log({ ...event, outcome: 'executed', result: outcome });
   } catch (error) {
-    stop(error.message === 'fetch failed' ? 'Game bridge unavailable. Launch Slay the Spire 2 with STS2_MCP enabled.' : error.message);
-    await log({ kind: 'error', message: view.message });
+    const code = error.code ?? 'RUN_FAILURE';
+    const message = error.code === 'JEV_BACKEND_FAILURE'
+      ? `${error.message} Runner stopped; no gameplay action was sent after failure.`
+      : error.message === 'fetch failed'
+        ? 'Game bridge unavailable. Launch Slay the Spire 2 with STS2_MCP enabled.'
+        : error.message;
+    stop(message);
+    await log({ kind: 'error', code, message: view.message });
   } finally { busy = false; view.pending = null; }
 }
 
@@ -259,7 +272,7 @@ const server = http.createServer(async (req, res) => {
       if (req.headers['x-spire-control'] !== '1') return json(403, { error: 'Missing control header' });
       if (req.url === '/api/pause') { stop('Paused. You can take over in the game.'); return json(200, { ok: true }); }
       if (req.url === '/api/run') {
-        if (!apiKey) return json(400, { error: 'Missing API key' });
+        if (!apiKey) return json(400, { code: 'JEV_BACKEND_FAILURE', error: 'JEV_BACKEND_FAILURE: Missing TypeSafe credentials.' });
         if (maxRuns > 0 && view.runsCompleted >= maxRuns) return json(409, { error: `Run limit reached (${view.runsCompleted}/${maxRuns}). Start a new session to continue.` });
         generation++; waitingSince = 0; lastExecuted = ''; view.mode = 'running'; view.message = 'Autoplay enabled';
         return json(200, { ok: true });
