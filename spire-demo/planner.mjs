@@ -6,6 +6,7 @@ import {mechanicsReview} from './mechanics.mjs';
 import {setupLinks} from './setup-links.mjs';
 import {encounterBrief,deckSnapshot,visibleState} from './encounters.mjs';
 import { actionsFor, factsFor, makeQuestion } from './actions.mjs';
+import { activeTrainingProfile, applyTrainingProfile } from './training-profile.mjs';
 
 export const POLICY_VERSION = 'jev-visible-v23-retaliation';
 const amount = (powers, name) => (powers ?? []).filter(p => p.name?.toLowerCase() === name.toLowerCase()).reduce((n,p) => n + Number(p.amount ?? 0), 0);
@@ -420,10 +421,13 @@ export function decisionWarnings(s,c) {
 const isCombat = s => ['monster','elite','boss'].includes(s.state_type);
 export function decisionCandidates(s) { return isCombat(s) ? planCandidates(s) : actionsFor(s); }
 
-export function decisionQuestion(s,candidates) {
+export function decisionQuestion(s,candidates,{trainingProfile=activeTrainingProfile,recent}={}) {
   s=visibleState(s);
-  if(!isCombat(s)){const q=makeQuestion(s,candidates);q.state.encounter=encounterBrief(s);q.state.deck=deckSnapshot(s);q.state.spending_routes=spendingRoutes(s);return q;}
-  return {
+  if(!isCombat(s)){
+    const q=makeQuestion(s,candidates);q.state.encounter=encounterBrief(s);q.state.deck=deckSnapshot(s);q.state.spending_routes=spendingRoutes(s);
+    return applyTrainingProfile(q,trainingProfile,{recent});
+  }
+  const q = {
     model:'typesafe/jev-1.13',
     state:{game:'Slay the Spire 2',objective:'Win the run. Survive the current turn and preserve useful resources.',state:s,encounter:encounterBrief(s),deck:deckSnapshot(s),facts:factsFor(s),policy:POLICY_VERSION,setup_dependencies:setupLinks(s),mechanics_review:mechanicsReview(s),potion_timing:potionTiming(s),
       forecast_scope:'Plans are short prefixes, not complete optimal turns. Forecasts assume ending after the prefix. Null means unknown, not zero. Partial outcomes have explicit caveats. Do not treat displayed card damage as actual damage through enemy powers.'},
@@ -432,4 +436,5 @@ export function decisionQuestion(s,candidates) {
       criteria:Object.fromEntries(candidates.map(c=>[c.id,JSON.stringify({sequence:c.plan,forecast:c.forecast,first_action_rules:c.details.description})])),
     }},
   };
+  return applyTrainingProfile(q,trainingProfile,{recent});
 }

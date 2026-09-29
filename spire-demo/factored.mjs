@@ -24,6 +24,7 @@
 
 import { decisionQuestion } from './planner.mjs';
 import { compactRequest } from './compact-request.mjs';
+import { activeTrainingProfile } from './training-profile.mjs';
 
 export const FACTORED_VERSION = 'jev-single-call-factored-v1';
 
@@ -99,20 +100,22 @@ function normalise(values, deadband = DEADBAND) {
     [id, typeof v !== 'number' ? null : (v - lo) / span]));
 }
 
-export function factoredQuestion(state, candidates, { maxFactored = MAX_FACTORED_CANDIDATES, waste = true } = {}) {
-  const base = decisionQuestion(state, candidates);
+export function factoredQuestion(state, candidates, { maxFactored = MAX_FACTORED_CANDIDATES, waste = true, trainingProfile = activeTrainingProfile, recent } = {}) {
+  const profile = trainingProfile;
+  const base = decisionQuestion(state, candidates, { trainingProfile: profile, recent });
+  const factorQuestions = profile?.factor_questions ?? {};
   const factored = candidates.slice(0, maxFactored);
   const questions = { ...base.questions };
   for (const c of factored) {
     questions['safe_' + c.id] = { type: 'noul', instructions: {
       candidate: c.id,
-      question: 'Given `state`, does taking the candidate identified by `candidate` leave the player able to survive the displayed incoming attack this turn? Answer no if it leaves lethal or near-lethal damage unblocked. Answer no if the candidate is not a legal action here.' } };
+      question: factorQuestions.safe || 'Given `state`, does taking the candidate identified by `candidate` leave the player able to survive the displayed incoming attack this turn? Answer no if it leaves lethal or near-lethal damage unblocked. Answer no if the candidate is not a legal action here.' } };
     questions['prog_' + c.id] = { type: 'noul', instructions: {
       candidate: c.id,
-      question: 'Given `state`, does taking the candidate identified by `candidate` make real progress toward winning the run, such as securing a kill, applying a debuff that pays off, or spending energy efficiently? Answer no if it merely survives the turn without advancing.' } };
+      question: factorQuestions.progress || 'Given `state`, does taking the candidate identified by `candidate` make real progress toward winning the run, such as securing a kill, applying a debuff that pays off, or spending energy efficiently? Answer no if it merely survives the turn without advancing.' } };
     if (waste) questions['waste_' + c.id] = { type: 'noul', instructions: {
       candidate: c.id,
-      question: 'Given `state`, does the candidate identified by `candidate` pay a lasting cost whose payoff cannot actually be collected here? Costs include losing HP, exhausting or discarding cards, and spending energy on setup. Answer yes if the payoff needs a card, a target, an energy amount or a number of remaining turns that the visible state does not supply, or if it forgoes an available decisive play such as a kill. Answer no when the payoff is collectable now.' } };
+      question: factorQuestions.waste || 'Given `state`, does the candidate identified by `candidate` pay a lasting cost whose payoff cannot actually be collected here? Costs include losing HP, exhausting or discarding cards, and spending energy on setup. Answer yes if the payoff needs a card, a target, an energy amount or a number of remaining turns that the visible state does not supply, or if it forgoes an available decisive play such as a kill. Answer no when the payoff is collectable now.' } };
   }
   return { ...base, questions };
 }
@@ -155,12 +158,12 @@ export function combine(candidates, answers, weights = WEIGHTS) {
   return { scored, probabilities, margin: Number(margin.toFixed(4)) };
 }
 
-export async function factoredDeliberate({ state, candidates, ask, onStage = () => {}, weights = WEIGHTS, maxFactored = MAX_FACTORED_CANDIDATES }) {
+export async function factoredDeliberate({ state, candidates, ask, onStage = () => {}, weights = WEIGHTS, maxFactored = MAX_FACTORED_CANDIDATES, trainingProfile = activeTrainingProfile, recent }) {
   if (candidates.length <= 1) {
-    return { ...await ask(compactRequest(decisionQuestion(state, candidates))), deliberation: null };
+    return { ...await ask(compactRequest(decisionQuestion(state, candidates, { trainingProfile, recent }))), deliberation: null };
   }
   onStage('Jev is scoring every option in one pass');
-  const result = await ask(compactRequest(factoredQuestion(state, candidates, { maxFactored, waste: (weights.waste ?? 0) > 0 })));
+  const result = await ask(compactRequest(factoredQuestion(state, candidates, { maxFactored, waste: (weights.waste ?? 0) > 0, trainingProfile, recent })));
   const answers = result.answers ?? {};
   const { scored, probabilities, margin } = combine(candidates, answers, weights);
   const best = scored[0];

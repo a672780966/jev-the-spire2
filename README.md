@@ -322,6 +322,40 @@ SPIRE_SINGLE_CALL=1 node spire-demo/server.mjs     # dashboard at http://127.0.0
 
 Start a normal singleplayer run in the game, then press **Autoplay**. 🚀
 
+### Windows: start a three-run Ironclad batch
+
+For a fresh profile, build the bridge DLL for the installed game version and copy `STS2_MCP.dll`,
+`STS2_MCP.json`, and its license into the game's `mods` folder. In Slay the Spire 2, open
+**Settings → Mods**, enable **STS2 MCP**, accept the mod prompt, and restart the game. The bridge
+must answer at `http://127.0.0.1:15526/api/v1/singleplayer` before Jev can run.
+
+From PowerShell, start the unchanged factored Jev runner with a bounded menu path and run count:
+
+```powershell
+$env:SPIRE_SINGLE_CALL = '1'
+$env:SPIRE_AUTO_START = '1'
+$env:SPIRE_MAX_RUNS = '3'
+$env:SPIRE_SESSION_ID = 'ironclad-batch-01'
+Remove-Item Env:SPIRE_ADVISER -ErrorAction SilentlyContinue
+node --env-file='C:\path\to\jev-live\.env' .\spire-demo\server.mjs
+```
+
+Open `http://127.0.0.1:4317` and press **Autoplay**. Jev selects the singleplayer standard run,
+Ironclad, and embark from the advertised legal menu actions, then chooses all gameplay actions.
+The batch stops after three recorded run endings. Keep `SPIRE_ADVISER` unset; Luna is only used by
+the separate offline trainer below.
+
+### Offline Luna → Jev training
+
+After a batch produces defeat or rejected-action evidence, run
+`node --env-file='C:\path\to\jev-live\.env' .\spire-demo\experiment\train-offline.mjs`.
+GPT-6 Luna reviews only those private JSONL snapshots and suggests a bounded Jev prompt profile.
+The trainer then replays the frozen states through Jev once with the baseline prompt and once with
+the proposed profile. It never calls the game bridge. Reports and candidate profiles are written
+under `.private/spire-training/`; proposed profiles are not promoted automatically. To try one in
+a later Jev-only run, set `SPIRE_TRAINING_PROFILE` to the reviewed `training-profile.json` path.
+This replay compares choices on recorded states and does not claim a win-rate change.
+
 <details>
 <summary><b>🎛️ Every runtime flag</b></summary>
 
@@ -333,6 +367,10 @@ Start a normal singleplayer run in the game, then press **Autoplay**. 🚀
 | `SPIRE_HEDGE` | `1` | `0` disables request hedging |
 | `SPIRE_PLAN_BENEFIT` | *unset* | enables the plan-benefit scoring path |
 | `SPIRE_ADVISER` | *unset* | `luna` runs the opt-in Luna advisory experiment ([details](spire-demo/experiment/README.md)) |
+| `SPIRE_AUTO_START` | *unset* | `1` enables only the legal main-menu → standard → Ironclad → embark path |
+| `SPIRE_MAX_RUNS` | `0` | stop the auto-start batch after N logged run endings; requires `SPIRE_AUTO_START=1` |
+| `SPIRE_SESSION_ID` | restored or timestamp | isolate a run batch and its logs under `.private/spire-runs/` |
+| `SPIRE_TRAINING_PROFILE` | *unset* | load a reviewed offline profile to adjust Jev context, state facts, factor questions, memory, and candidate representation |
 | `PORT` | `4317` | dashboard port |
 | `MAX_INPUT_TOKENS` | — | stop threshold for a run |
 | `MAX_DECISIONS` | — | stop after N decisions |
@@ -354,6 +392,7 @@ native companion app on first run, starts the server if port 4317 is quiet, and 
 | 🪝 [`spire-demo/hedge.mjs`](spire-demo/hedge.mjs) | Staggered request hedging for a bimodally-slow endpoint. **Idempotent reads only** — game commands are never hedged. |
 | 🧪 [`spire-demo/benchmark/sweep.mjs`](spire-demo/benchmark/sweep.mjs) | Parameter sweep scoring latency against decision quality on fixed fixtures. |
 | 🏁 [`spire-demo/benchmark/vs-llm.mjs`](spire-demo/benchmark/vs-llm.mjs) | Head-to-head against any OpenRouter model on byte-identical state. |
+| 🧠 [`spire-demo/experiment/train-offline.mjs`](spire-demo/experiment/train-offline.mjs) | Reviews failure evidence with isolated GPT-6 Luna, then compares baseline and proposed prompts with Jev on frozen states; it never sends game actions. |
 | 📤 [`tools/youtube-upload.mjs`](tools/youtube-upload.mjs) | Uploads the run video, sets metadata, attaches a thumbnail. |
 | 📝 [`tools/youtube-meta.json`](tools/youtube-meta.json) | Title/description/tags as **reviewable JSON**, so the copy is diffable before anything goes public. |
 

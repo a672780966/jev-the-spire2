@@ -8,7 +8,39 @@ export function fingerprint(state) {
 // chooses an ID; it never supplies arbitrary HTTP endpoints or action arguments.
 // Explicit user exclusion: never acquire Sword of Stone.
 const excludedRelic = x => [x.name,x.relic_name,x.id,x.relic_id].some(v => /^(?:the )?sword(?: of| and the) stone$/i.test(String(v??'').replaceAll('_',' ')));
-export function actionsFor(s) {
+
+export function menuCandidates(s, { ironcladSelected = false } = {}) {
+  const out = [];
+  const add = option => out.push({ id: `a${out.length}`, command: { action: 'menu_select', option }, label: `Select ${option}`, details: { option } });
+  if (s.state_type === 'game_over') {
+    add('main_menu');
+    return out;
+  }
+  if (s.state_type !== 'menu') return out;
+
+  const options = (s.options ?? []).map(x => typeof x === 'string' ? { name: x, enabled: true } : x)
+    .filter(x => typeof x?.name === 'string' && x.enabled !== false);
+  const has = name => options.some(x => x.name.toLowerCase() === name.toLowerCase());
+  const screen = String(s.menu_screen ?? '').toLowerCase();
+  if (screen === 'main' || screen === 'main_menu') {
+    if (has('singleplayer')) add('singleplayer');
+  } else if (screen === 'singleplayer') {
+    if (has('standard')) add('standard');
+  } else if (screen === 'character_select') {
+    // Explicitly select Ironclad first, even if another character is already
+    // selected. Embark follows only after that Jev-selected transition.
+    if (ironcladSelected) {
+      if (has('embark')) add('embark');
+    } else {
+      const ironclad = options.find(x => /ironclad/i.test(x.name));
+      if (ironclad) add(ironclad.name);
+    }
+  }
+  return out;
+}
+
+export function actionsFor(s, menuOptions) {
+  if (s.state_type === 'menu' || s.state_type === 'game_over') return menuCandidates(s, menuOptions);
   const out = [];
   const add = (action, args = {}, label = action, details = {}) =>
     out.push({ id: `a${out.length}`, command: { action, ...args }, label, details });

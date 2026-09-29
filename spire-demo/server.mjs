@@ -31,20 +31,30 @@ if (!apiKey) {
 }
 const snapshotFile = resolve(logDir, 'session.json');
 const saved = JSON.parse(await readFile(snapshotFile, 'utf8').catch(() => 'null'));
-const sessionId = saved?.sessionId ?? new Date().toISOString().replaceAll(':', '-');
+const requestedSessionId = process.env.SPIRE_SESSION_ID;
+if (requestedSessionId && !/^[\w.-]{1,80}$/.test(requestedSessionId)) throw Error('SPIRE_SESSION_ID must contain only letters, digits, dot, dash, or underscore.');
+const sessionId = requestedSessionId ?? saved?.sessionId ?? new Date().toISOString().replaceAll(':', '-');
+const savedSession = saved?.sessionId === sessionId ? saved : null;
 const logFile = resolve(logDir, `${sessionId}.jsonl`);
 const MAX_DECISIONS = Number(process.env.MAX_DECISIONS ?? 2000);
 const MAX_INPUT_TOKENS = Number(process.env.MAX_INPUT_TOKENS ?? 10000000);
+const autoStart = process.env.SPIRE_AUTO_START === '1';
+const maxRuns = Number(process.env.SPIRE_MAX_RUNS ?? 0);
+if (!Number.isSafeInteger(maxRuns) || maxRuns < 0) throw Error('SPIRE_MAX_RUNS must be a non-negative integer.');
+if (maxRuns > 0 && !autoStart) throw Error('SPIRE_MAX_RUNS requires SPIRE_AUTO_START=1.');
 const view = {
   mode: 'paused', connected: false, configured: Boolean(apiKey), state: null,
   decisions: 0, actions: 0, inputTokens: 0, latencyMs: 0, model: null,
-  message: 'Ready. Start a normal singleplayer run in the game, then press Autoplay.',
-  events: [], sessionId, maxDecisions: MAX_DECISIONS, maxInputTokens: MAX_INPUT_TOKENS,
+  message: autoStart ? 'Ready. Press Autoplay to start the Ironclad run sequence.' : 'Ready. Start a normal singleplayer run in the game, then press Autoplay.',
+  events: [], sessionId, runsCompleted: savedSession?.runsCompleted ?? 0, maxRuns,
+  maxDecisions: MAX_DECISIONS, maxInputTokens: MAX_INPUT_TOKENS,
 };
-if (saved) Object.assign(view, saved, { mode: 'paused', connected: false, configured: Boolean(apiKey), maxDecisions: MAX_DECISIONS, maxInputTokens: MAX_INPUT_TOKENS, message: 'Session restored. Press Autoplay to resume.' });
+if (savedSession) Object.assign(view, savedSession, { mode: 'paused', connected: false, configured: Boolean(apiKey), maxRuns, maxDecisions: MAX_DECISIONS, maxInputTokens: MAX_INPUT_TOKENS, message: 'Session restored. Press Autoplay to resume.' });
 view.planBenefitEnabled=planBenefitEnabled;
 view.adviser=lunaEnabled?'gpt-5.6-luna:max':null;
 let generation = 0, busy = false, lastExecuted = '', latestState = null, waitingSince = 0, nextDecisionAt = 0;
+let lastRunEndFingerprint = savedSession?.events?.find(e => e.kind === 'run_end')?.fingerprint ?? '';
+let ironcladSelected = false, awaitingEmbarkChoice = false;
 async function log(event) {
   const entry = { time: new Date().toISOString(), ...event };
   view.events.unshift(entry); view.events.length = Math.min(view.events.length, 60);
@@ -93,9 +103,20 @@ async function step(token, preview = false) {
   busy = true;
   try {
     const s = await observe();
+    if (s.state_type === 'menu' && ['main', 'main_menu'].includes(String(s.menu_screen ?? '').toLowerCase())) {
+      ironcladSelected = false; awaitingEmbarkChoice = false;
+    }
     if (s.state_type === 'game_over') {
-      stop(s.player?.hp <= 0 ? 'Run ended in defeat.' : 'Run ended. Verify the result in the game.');
-      await log({ kind: 'run_end', state: s }); return;
+      const endFingerprint = fingerprint(s);
+      if (endFingerprint !== lastRunEndFingerprint) {
+        lastRunEndFingerprint = endFingerprint;
+        view.runsCompleted = (view.runsCompleted ?? 0) + 1;
+        await log({ kind: 'run_end', outcome: s.player?.hp <= 0 ? 'defeat' : 'cleared', runsCompleted: view.runsCompleted, fingerprint: endFingerprint, state: s });
+      }
+      if (!autoStart || !maxRuns || view.runsCompleted >= maxRuns) {
+        stop(s.player?.hp <= 0 ? 'Run ended in defeat.' : 'Run ended. Verify the result in the game.');
+        return;
+      }
     }
     // The bridge briefly reports unknown while entering a room or opening a selection.
     // Poll without issuing mutations, but retain a bounded stop for genuinely stuck screens.
@@ -105,19 +126,30 @@ async function step(token, preview = false) {
       else view.message = 'Waiting for the room transition to finish…';
       return;
     }
-    if (['menu', 'overlay'].includes(s.state_type)) {
+    if (s.state_type === 'overlay' || (s.state_type === 'menu' && !autoStart)) {
       stop(`Waiting at ${s.state_type}. Resolve this screen in the game, then resume.`); return;
     }
-    const planningState=facingState(s,view.events);
-    const actions = decisionCandidates(rewardState(planningState,view.events));
+    const setupState = s.state_type === 'menu' || s.state_type === 'game_over';
+    const planningState = setupState ? s : facingState(s,view.events);
+    const actions = setupState ? actionsFor(planningState, { ironcladSelected }) : decisionCandidates(rewardState(planningState,view.events));
     if (!actions.length) {
+      if (setupState) {
+        if (s.state_type === 'menu' && s.menu_screen === 'character_select' && ironcladSelected) {
+          waitingSince ||= Date.now();
+          if (Date.now() - waitingSince > 45000) stop('Ironclad is selected, but the game did not enable Embark within 45 seconds. Take over in the game.');
+          else view.message = 'Waiting for the selected Ironclad to enable Embark…';
+          return;
+        }
+        stop(`No supported legal action is available on ${s.menu_screen ?? s.state_type}. Take over in the game.`);
+        await log({ kind: 'unsupported_menu', state: s }); return;
+      }
       waitingSince ||= Date.now();
       if (Date.now() - waitingSince > 45000) stop('No playable actions for 45 seconds. Check the game screen, then resume.');
       else view.message = 'Waiting for the next playable state…';
       return;
     }
     const hash = fingerprint(s);
-    if (hash === lastExecuted) {
+    if (hash === lastExecuted && !(s.state_type === 'menu' && s.menu_screen === 'character_select' && awaitingEmbarkChoice)) {
       waitingSince ||= Date.now();
       if (Date.now() - waitingSince > 45000) stop('The game did not change after the last action. Check the screen before resuming.');
       else view.message = 'Waiting for the game to finish the last action…';
@@ -185,6 +217,10 @@ async function step(token, preview = false) {
       throw error;
     }
     lastExecuted = hash; view.actions++; view.message = chosen.label;
+    if (s.state_type === 'menu' && s.menu_screen === 'character_select' && chosen.command.action === 'menu_select') {
+      if (String(chosen.command.option).toLowerCase() === 'embark') awaitingEmbarkChoice = false;
+      else if (/ironclad/i.test(String(chosen.command.option))) { ironcladSelected = true; awaitingEmbarkChoice = true; }
+    }
     nextDecisionAt = Date.now() + 1200;
     await log({ ...event, outcome: 'executed', result: outcome });
   } catch (error) {
@@ -224,6 +260,7 @@ const server = http.createServer(async (req, res) => {
       if (req.url === '/api/pause') { stop('Paused. You can take over in the game.'); return json(200, { ok: true }); }
       if (req.url === '/api/run') {
         if (!apiKey) return json(400, { error: 'Missing API key' });
+        if (maxRuns > 0 && view.runsCompleted >= maxRuns) return json(409, { error: `Run limit reached (${view.runsCompleted}/${maxRuns}). Start a new session to continue.` });
         generation++; waitingSince = 0; lastExecuted = ''; view.mode = 'running'; view.message = 'Autoplay enabled';
         return json(200, { ok: true });
       }

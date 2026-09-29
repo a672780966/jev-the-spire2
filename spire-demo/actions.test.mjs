@@ -17,9 +17,24 @@ test('legal candidates exclude unplayable cards and dead enemies', () => {
     { action: 'play_card', card_index: 2 }, { action: 'end_turn' },
   ]);
 });
-test('never acts during enemy turns or menu screens', () => {
+test('never acts during enemy turns and only offers the safe Ironclad start path in menus', () => {
   const s = combat(); s.battle.turn = 'enemy'; assert.deepEqual(actionsFor(s), []);
-  assert.deepEqual(actionsFor({ state_type: 'menu', options: ['abandon_run', 'continue'] }), []);
+  assert.deepEqual(actionsFor({ state_type: 'menu', menu_screen: 'main', options: ['abandon_run', 'continue', 'multiplayer', 'singleplayer'] }).map(a => a.command), [
+    { action: 'menu_select', option: 'singleplayer' },
+  ]);
+  assert.deepEqual(actionsFor({ state_type: 'menu', menu_screen: 'singleplayer', options: [{ name: 'standard', enabled: true }, { name: 'daily', enabled: true }] }).map(a => a.command), [
+    { action: 'menu_select', option: 'standard' },
+  ]);
+  assert.deepEqual(actionsFor({ state_type: 'menu', menu_screen: 'singleplayer', options: [{ name: 'standard', enabled: false }] }), []);
+  assert.deepEqual(actionsFor({ state_type: 'menu', menu_screen: 'character_select', options: [
+    { name: 'IRONCLAD', enabled: true }, { name: 'SILENT', enabled: true }, { name: 'embark', enabled: false },
+  ] }).map(a => a.command), [{ action: 'menu_select', option: 'IRONCLAD' }]);
+  assert.deepEqual(actionsFor({ state_type: 'menu', menu_screen: 'character_select', options: [
+    { name: 'IRONCLAD', enabled: true }, { name: 'embark', enabled: true },
+  ] }, { ironcladSelected: true }).map(a => a.command), [{ action: 'menu_select', option: 'embark' }]);
+  assert.deepEqual(actionsFor({ state_type: 'menu', menu_screen: 'character_select', options: [{ name: 'IRONCLAD', enabled: false }] }), []);
+  assert.deepEqual(actionsFor({ state_type: 'menu', menu_screen: 'settings', options: ['quit'] }), []);
+  assert.deepEqual(actionsFor({ state_type: 'game_over' }).map(a => a.command), [{ action: 'menu_select', option: 'main_menu' }]);
 });
 test('state fingerprint changes when hand indices, HP or turn change', () => {
   const s = combat(), original = fingerprint(s);
